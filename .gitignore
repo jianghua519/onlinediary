@@ -8,8 +8,7 @@ build/
 coverage/
 
 # Env
-.env
-.env.*
+
 
 # Logs
 *.log
