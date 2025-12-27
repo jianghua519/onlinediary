@@ -1,0 +1,405 @@
+## 项目概述
+家庭多用户日记应用,参考Day One设计,支持端到端加密,部署在Synology DS216+上,支持外网访问。
+
+## 核心功能需求
+
+### 1. 用户认证与权限
+- 用户名密码注册/登录
+- 首个注册用户自动成为管理员
+- 管理员可以:
+  - 批准新用户注册(可选开启审批模式)
+  - 查看系统用户列表(不能查看他人日记)
+  - 管理存储空间配额
+- 会话管理(JWT + Refresh Token)
+- 记住登录状态(30天)
+- 密码修改功能
+
+### 2. 端到端加密机制
+- **加密流程**:
+  - 用户注册时生成主密钥(从密码派生,PBKDF2)
+  - 主密钥加密用户的私钥,私钥存储在服务器
+  - 每篇日记用随机AES-256密钥加密
+  - 日记密钥用用户公钥加密后存储
+- **实现**:
+  - 所有加解密在浏览器端完成
+  - 服务器只存储加密后的数据
+  - 密码忘记 = 数据永久丢失(需明确警告用户)
+- **性能优化**:
+  - 加密操作使用Web Crypto API
+  - 大文件分块加密
+
+### 3. 日记编辑功能
+- **自定义日期**
+  - 默认当前时间
+  - 可手动选择任意历史日期
+  - 可精确到小时分钟
+  - 阻止未来日期(可配置)
+- **富文本编辑器**
+  - Markdown语法支持
+  - 实时预览
+  - 格式工具栏:标题、粗体、斜体、引用、代码块、列表
+  - 图片拖拽上传
+  - 图片自动压缩(前端压缩后再加密)
+- **元数据**
+  - 标题(可选,默认取首行或日期)
+  - 标签(多标签,自动补全)
+  - 天气(手动选择图标)
+  - 位置(文本输入)
+  - 心情(emoji选择器)
+- **自动保存**
+  - 输入停止3秒后自动保存草稿
+  - 草稿也加密存储
+  - 离线编辑缓存在IndexedDB
+
+### 4. 日记浏览与管理
+- **视图模式**
+  - 时间线视图(瀑布流卡片)
+  - 日历视图(月历,有日记的日期标记)
+  - 列表视图(紧凑)
+  - 标签云视图
+- **搜索与筛选**
+  - 全文搜索(客户端解密后搜索)
+  - 多标签AND/OR筛选
+  - 日期范围选择器
+  - 按心情/天气筛选
+- **操作**
+  - 编辑/删除(带确认)
+  - 星标收藏
+  - 批量操作(批量删除、导出)
+  - 导出格式:加密ZIP、纯文本Markdown、PDF
+
+### 5. 数据同步与离线
+- **实时同步**
+  - WebSocket连接(心跳保活)
+  - 编辑时实时推送更新给其他设备
+  - 冲突检测:版本号 + 时间戳
+  - 冲突解决:提示用户手动选择保留版本
+- **离线能力**
+  - Service Worker缓存应用壳
+  - IndexedDB存储最近100篇日记
+  - 离线编辑加入同步队列
+  - 在线后自动同步队列
+- **多设备通知**
+  - 同一账号其他设备在线时提示"有新日记"
+
+### 6. 附件管理
+- **图片**
+  - 支持格式:JPG, PNG, GIF, WebP
+  - 前端自动压缩(长边最大2048px)
+  - 加密后上传
+  - 缩略图生成(客户端)
+- **限制**
+  - 单篇日记最多10张图片
+  - 单张最大10MB(压缩前)
+  - 每用户存储配额(默认5GB)
+
+## 技术架构
+
+### 前端技术栈
+```
+React 18 + TypeScript
+├── 状态管理: Zustand
+├── 路由: React Router v6
+├── UI组件: Tailwind CSS + shadcn/ui
+├── 编辑器: Tiptap v2
+├── 加密: Web Crypto API + crypto-js
+├── 本地存储: Dexie.js (IndexedDB)
+├── 实时通信: Socket.io-client
+├── 日期处理: date-fns
+├── 图片压缩: browser-image-compression
+└── PWA: Workbox
+```
+
+### 后端技术栈
+```
+Node.js 18 + TypeScript
+├── 框架: Express.js
+├── 数据库: MariaDB 10 + Sequelize ORM
+├── 实时通信: Socket.io
+├── 认证: jsonwebtoken + bcrypt
+├── 文件存储: 本地文件系统(加密文件)
+├── 限流: express-rate-limit
+├── 日志: winston
+└── 进程管理: PM2
+```
+
+### 部署架构
+```
+外网访问
+  ↓ (HTTPS)
+Synology DSM反向代理 + Let's Encrypt证书
+  ↓
+Node.js应用 (端口3000)
+  ├── Express API服务
+  ├── Socket.io服务
+  └── 静态文件服务
+  ↓
+MariaDB 10 (端口3306)
+  └── journal_db数据库
+  ↓
+文件系统
+  └── /volume1/journal/uploads/ (加密文件)
+```
+
+## 数据库设计
+
+### users表
+```sql
+CREATE TABLE users (
+  id CHAR(36) PRIMARY KEY,
+  username VARCHAR(50) UNIQUE NOT NULL,
+  password_hash VARCHAR(255) NOT NULL,
+  email VARCHAR(100),
+  public_key TEXT NOT NULL,
+  encrypted_private_key TEXT NOT NULL,
+  is_admin BOOLEAN DEFAULT FALSE,
+  storage_quota BIGINT DEFAULT 5368709120, -- 5GB
+  storage_used BIGINT DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  last_login TIMESTAMP,
+  settings JSON,
+  INDEX idx_username (username)
+);
+```
+
+### entries表
+```sql
+CREATE TABLE entries (
+  id CHAR(36) PRIMARY KEY,
+  user_id CHAR(36) NOT NULL,
+  encrypted_title BLOB,
+  encrypted_content BLOB NOT NULL,
+  encrypted_metadata BLOB, -- tags, weather, mood, location
+  encrypted_entry_key BLOB NOT NULL, -- 用用户公钥加密的日记密钥
+  entry_date DATETIME NOT NULL, -- 用户自定义的日记日期
+  is_favorite BOOLEAN DEFAULT FALSE,
+  version INT DEFAULT 1,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  INDEX idx_user_date (user_id, entry_date),
+  INDEX idx_user_favorite (user_id, is_favorite)
+);
+```
+
+### attachments表
+```sql
+CREATE TABLE attachments (
+  id CHAR(36) PRIMARY KEY,
+  entry_id CHAR(36) NOT NULL,
+  encrypted_filename BLOB NOT NULL,
+  file_path VARCHAR(500) NOT NULL, -- 加密文件存储路径
+  encrypted_file_key BLOB NOT NULL,
+  mime_type VARCHAR(100),
+  file_size BIGINT NOT NULL,
+  thumbnail_path VARCHAR(500), -- 加密缩略图路径
+  uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (entry_id) REFERENCES entries(id) ON DELETE CASCADE,
+  INDEX idx_entry (entry_id)
+);
+```
+
+### sync_queue表 (同步队列)
+```sql
+CREATE TABLE sync_queue (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  user_id CHAR(36) NOT NULL,
+  entry_id CHAR(36),
+  operation ENUM('create', 'update', 'delete') NOT NULL,
+  data JSON,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  processed BOOLEAN DEFAULT FALSE,
+  INDEX idx_user_processed (user_id, processed)
+);
+```
+
+## AI辅助开发流程
+
+### 迭代1:基础框架搭建 (AI驱动)
+**目标**: 搭建可运行的前后端框架
+- **任务**:
+  1. 初始化React + TypeScript项目,配置Tailwind
+  2. 搭建Express + TypeScript后端,连接MariaDB
+  3. 实现基础路由和API结构
+  4. 配置开发环境(热重载、代理)
+- **验证方法**:
+  - [ ] `npm run dev` 前端启动成功,显示登录页
+  - [ ] `npm run server` 后端启动成功,访问`/api/health`返回200
+  - [ ] MariaDB连接成功,可创建测试表
+  - [ ] 前端API调用后端成功(测试接口)
+
+### 迭代2:用户认证系统 (AI驱动)
+**目标**: 完整的注册登录流程
+- **任务**:
+  1. 实现注册API(密码加密、主密钥生成、密钥对生成)
+  2. 实现登录API(JWT签发、密钥解密)
+  3. 前端注册/登录表单
+  4. 路由守卫(未登录重定向)
+- **验证方法**:
+  - [ ] 注册新用户成功,数据库正确存储
+  - [ ] 首个用户自动成为管理员
+  - [ ] 登录成功获得Token,存储到localStorage
+  - [ ] Token过期后自动跳转登录页
+  - [ ] 密码错误显示错误提示
+  - [ ] 使用Postman测试所有API端点
+
+### 迭代3:加密系统实现 (AI驱动)
+**目标**: 完整的端到端加密流程
+- **任务**:
+  1. 实现客户端加密工具类(AES-256加密/解密)
+  2. 实现密钥管理(主密钥派生、密钥对生成)
+  3. 测试加密性能
+- **验证方法**:
+  - [ ] 加密100字文本<50ms
+  - [ ] 加密1MB图片<500ms
+  - [ ] 加密后数据无法在服务器端解密(人工检查数据库)
+  - [ ] 不同用户无法解密对方数据
+  - [ ] 退出登录后清除内存中的密钥
+  - [ ] 编写单元测试覆盖加密模块
+
+### 迭代4:日记CRUD功能 (AI驱动)
+**目标**: 创建、阅读、更新、删除日记
+- **任务**:
+  1. 实现Tiptap编辑器集成
+  2. 实现日期时间选择器(可自定义日期)
+  3. 实现标签输入组件(带自动补全)
+  4. 实现创建/编辑日记API
+  5. 实现日记列表页(时间线视图)
+- **验证方法**:
+  - [ ] 创建日记,选择历史日期(如2020-01-01),保存成功
+  - [ ] 编辑日记内容,自动保存草稿
+  - [ ] 列表页按entry_date排序显示
+  - [ ] 删除日记需要二次确认
+  - [ ] 加密后的日记在数据库中无法直接阅读
+  - [ ] 标签自动补全显示历史标签
+  - [ ] 测试并发编辑冲突检测
+
+### 迭代5:图片上传与加密 (AI驱动)
+**目标**: 支持图片上传、加密、显示
+- **任务**:
+  1. 前端图片压缩功能
+  2. 图片加密后上传
+  3. 服务端存储加密文件
+  4. 图片解密显示(blob URL)
+  5. 缩略图生成
+- **验证方法**:
+  - [ ] 拖拽上传10MB图片,自动压缩到<2MB
+  - [ ] 图片加密后上传,服务器无法查看原图
+  - [ ] 日记中正确显示解密后的图片
+  - [ ] 删除日记同时删除关联图片文件
+  - [ ] 存储配额检查生效(超出配额拒绝上传)
+  - [ ] 测试10张图片同时上传
+
+### 迭代6:实时同步功能 (AI驱动)
+**目标**: WebSocket双向通信,多设备同步
+- **任务**:
+  1. Socket.io服务端集成
+  2. 客户端Socket连接管理
+  3. 日记更新事件推送
+  4. 冲突检测与解决
+- **验证方法**:
+  - [ ] 打开两个浏览器窗口,同一账号登录
+  - [ ] 窗口A创建日记,窗口B实时收到更新
+  - [ ] 窗口A编辑日记,窗口B显示"有新版本"提示
+  - [ ] 模拟离线场景,重新上线后自动同步
+  - [ ] 断网后编辑日记,联网后成功提交
+  - [ ] 压力测试:10个并发连接
+
+### 迭代7:搜索与筛选 (AI驱动)
+**目标**: 全文搜索、标签筛选、日期范围
+- **任务**:
+  1. 客户端全文搜索(解密后搜索)
+  2. 多标签筛选逻辑
+  3. 日期范围选择器
+  4. 搜索结果高亮
+- **验证方法**:
+  - [ ] 搜索关键词,正确返回包含该词的日记
+  - [ ] 选择多个标签,AND逻辑正确
+  - [ ] 日期范围筛选准确
+  - [ ] 搜索100篇日记<1秒
+  - [ ] 搜索结果关键词高亮显示
+  - [ ] 空搜索返回全部结果
+
+### 迭代8:多视图与导出 (AI驱动)
+**目标**: 日历视图、导出功能
+- **任务**:
+  1. 实现月历组件
+  2. 日历视图标记有日记的日期
+  3. 导出为Markdown ZIP
+  4. 导出为PDF
+- **验证方法**:
+  - [ ] 日历视图正确显示当月日记分布
+  - [ ] 点击日历日期跳转到该日日记
+  - [ ] 导出ZIP包含所有日记Markdown文件和图片
+  - [ ] 导出PDF格式正确,图片正常显示
+  - [ ] 批量导出100篇日记成功
+  - [ ] 导出文件可在Day One等应用中导入
+
+### 迭代9:离线支持与PWA (AI驱动)
+**目标**: 离线可用,PWA安装
+- **任务**:
+  1. Service Worker配置
+  2. IndexedDB缓存最近日记
+  3. 离线编辑队列
+  4. PWA manifest配置
+- **验证方法**:
+  - [ ] 断网后应用仍可打开
+  - [ ] 离线可浏览缓存的日记
+  - [ ] 离线创建日记,联网后自动上传
+  - [ ] 桌面/手机可"添加到主屏幕"
+  - [ ] PWA图标正确显示
+  - [ ] 离线编辑10篇日记,全部成功同步
+
+### 迭代10:管理功能与优化 (AI驱动)
+**目标**: 管理员面板,性能优化
+- **任务**:
+  1. 管理员用户管理页面
+  2. 存储空间监控
+  3. 虚拟滚动优化长列表
+  4. 图片懒加载
+  5. 代码分割和打包优化
+- **验证方法**:
+  - [ ] 管理员可查看所有用户列表
+  - [ ] 存储空间显示准确
+  - [ ] 滚动1000篇日记列表流畅(60fps)
+  - [ ] 首屏加载时间<3秒(3G网络)
+  - [ ] Lighthouse性能评分>90
+  - [ ] 打包后体积<2MB(gzip)
+
+## 部署验证
+
+### Synology DS216+部署清单
+- [ ] 安装Node.js 18(通过DSM Package Center)
+- [ ] MariaDB 10已运行,创建journal_db数据库
+- [ ] 创建journal用户,授予数据库权限
+- [ ] PM2安装并配置自启动
+- [ ] 配置反向代理(DSM控制面板)
+- [ ] Let's Encrypt证书申请成功
+- [ ] 配置外网访问(DDNS + 端口转发)
+- [ ] 防火墙规则配置
+- [ ] 测试外网HTTPS访问
+
+### 外网访问测试
+- [ ] 4G/5G移动网络访问成功
+- [ ] 不同运营商网络测试
+- [ ] 延迟<500ms(国内网络)
+- [ ] 外网创建日记成功同步到内网设备
+
+## 安全检查清单
+- [ ] 所有API启用HTTPS
+- [ ] JWT Token有效期设置(15分钟访问,7天刷新)
+- [ ] 密码强度验证(最少8字符,含数字字母)
+- [ ] SQL注入防护(参数化查询)
+- [ ] XSS防护(内容sanitize)
+- [ ] CSRF Token验证
+- [ ] 文件上传类型白名单
+- [ ] Rate Limiting(登录5次/分钟)
+- [ ] 加密密钥永不发送到服务器
+- [ ] 敏感操作日志记录
+
+## 性能基准
+- [ ] 单用户并发10个请求,响应时间<200ms
+- [ ] 5个家庭用户同时在线,服务正常
+- [ ] 数据库10000条日记记录,查询<100ms
+- [ ] 内存占用<500MB
+- [ ] CPU占用<30%(空闲时<5%)

@@ -1,0 +1,15 @@
+{
+  "name": "onlinediary",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev": "npm --prefix frontend run dev",
+    "server": "npm --prefix backend run dev",
+    "build": "npm --prefix frontend run build && npm --prefix backend run build"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}
