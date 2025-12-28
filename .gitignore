@@ -9,6 +9,9 @@ build/
 coverage/
 
 # Env
+.env
+.env.local
+**/.env
 
 
 # Logs
