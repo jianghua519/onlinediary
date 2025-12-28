@@ -34,6 +34,9 @@ const getRandomBytes = (length: number) => {
   return bytes;
 };
 
+const toArrayBuffer = (bytes: Uint8Array): ArrayBuffer =>
+  Uint8Array.from(bytes).buffer;
+
 export const generateEntryKey = async () =>
   crypto.subtle.generateKey(
     { name: "AES-GCM", length: AES_KEY_LENGTH },
@@ -53,7 +56,7 @@ const deriveKeyMaterial = async (password: string, salt: Uint8Array) => {
   return crypto.subtle.deriveKey(
     {
       name: "PBKDF2",
-      salt,
+      salt: toArrayBuffer(salt),
       iterations: PBKDF2_ITERATIONS,
       hash: "SHA-256"
     },
@@ -75,7 +78,7 @@ const encryptWithAesGcm = async (plaintext: Uint8Array, key: CryptoKey) => {
       iv
     },
     key,
-    plaintext
+    toArrayBuffer(plaintext)
   );
 
   return {
@@ -106,7 +109,7 @@ const decryptWithAesGcm = async (
       iv
     },
     key,
-    cipherBytes
+    toArrayBuffer(cipherBytes)
   );
   return new Uint8Array(plaintext);
 };

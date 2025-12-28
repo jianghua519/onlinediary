@@ -34,9 +34,12 @@
     "@types/express": "^5.0.3",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/multer": "^2.0.0",
-    "@types/node": "^24.6.1",
+    "@types/node": "^18.19.0",
     "@types/uuid": "^10.0.0",
     "tsx": "^4.20.6",
     "typescript": "^5.9.2"
+  },
+  "engines": {
+    "node": ">=18 <19"
   }
 }

@@ -168,7 +168,6 @@ router.get("/", async (req, res) => {
     });
 
     if (!entry) {
-      await cleanupUpload(file, thumbnail);
       return res.status(404).json({ error: "Entry not found" });
     }
 

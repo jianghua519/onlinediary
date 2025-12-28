@@ -11,7 +11,6 @@ import {
   createUserKeyBundle,
   decryptPrivateKey,
   decryptWithEntryKey,
-  encryptPrivateKeyWithPassword,
   encryptWithEntryKey,
   generateEntryKey,
   runCryptoBenchmark,
@@ -232,7 +231,7 @@ const UI = {
   benchmarkLarge: "\u5927\u6587\u672c",
 };
 
-const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:3000";
+const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 const STORAGE_KEY = "diary_auth";
 const DRAFT_DB = "diary_drafts";
 const DRAFT_STORE = "drafts";
@@ -663,26 +662,6 @@ export default function App() {
     setAttachments([]);
   };
 
-  const handleManualRefresh = async () => {
-    if (!auth.refreshToken) return;
-    setError(null);
-    setStatus(null);
-
-    try {
-      const refreshed = await refreshTokens(auth.refreshToken);
-      const user = await fetchMe(refreshed.accessToken);
-      updateAuth({
-        accessToken: refreshed.accessToken,
-        refreshToken: refreshed.refreshToken,
-        user
-      });
-      setStatus("Session refreshed.");
-    } catch {
-      setError("Refresh failed. Please login again.");
-      clearAuth();
-      updateAuth({ accessToken: null, refreshToken: null, user: null });
-    }
-  };
 
   const unlockWithPassword = async (password: string, user?: User | null) => {
     const target = user ?? auth.user;
@@ -797,8 +776,7 @@ export default function App() {
       } as AttachmentView;
     }
 
-    const wrappedKey = parsePayload(record.encryptedFileKey);
-    const fileKey = await unwrapEntryKey(wrappedKey, key);
+    const fileKey = await unwrapEntryKey(record.encryptedFileKey, key);
     const filenamePayload = parsePayload(record.encryptedFilename);
     const filenameBytes = await decryptWithEntryKey(filenamePayload, fileKey);
     const filename = textDecoder.decode(filenameBytes);
@@ -883,14 +861,14 @@ export default function App() {
 
         const form = new FormData();
         form.append("entryId", selectedId);
-        form.append("encryptedFileKey", serializePayload(encrypted.encryptedFileKey));
+        form.append("encryptedFileKey", encrypted.encryptedFileKey);
         form.append("encryptedFilename", serializePayload(encrypted.encryptedFilename));
-        form.append("encryptedFile", new Blob([encodeBase64(encrypted.encryptedFile.data)]));
+        form.append("file", new Blob([serializePayload(encrypted.encryptedFile)]));
         form.append("mimeType", file.type);
         form.append("fileSize", String(file.size));
         form.append(
-          "encryptedThumbnail",
-          new Blob([encodeBase64(encryptedThumb.encryptedFile.data)])
+          "thumbnail",
+          new Blob([serializePayload(encryptedThumb.encryptedFile)])
         );
 
         const response = await apiFetch("/api/attachments", {
@@ -914,28 +892,24 @@ export default function App() {
     }
   };
 
-  const handleAttachmentDownload = async (attachment: AttachmentView) => {
+  const handleAttachmentOpen = async (attachment: AttachmentView) => {
     if (!privateKey) return;
     try {
-      const response = await apiFetch(`/api/attachments/${attachment.id}`);
+      const response = await apiFetch(`/api/attachments/${attachment.id}/file`);
       if (!response.ok) {
         throw new Error("Download failed");
       }
-      const payload = (await response.json()) as {
-        encryptedFile: string;
-        mimeType?: string | null;
-      };
-      const wrappedKey = parsePayload(attachment.encryptedFileKey);
-      const fileKey = await unwrapEntryKey(wrappedKey, privateKey);
-      const filePayload = parsePayload(payload.encryptedFile);
+      const payloadText = await response.text();
+      const fileKey = await unwrapEntryKey(attachment.encryptedFileKey, privateKey);
+      const filePayload = parsePayload(payloadText);
       const fileBytes = await decryptWithEntryKey(filePayload, fileKey);
-      const blob = new Blob([fileBytes], { type: payload.mimeType ?? "application/octet-stream" });
+      const fileBuffer = Uint8Array.from(fileBytes).buffer;
+      const blob = new Blob([fileBuffer], {
+        type: attachment.mimeType ?? "application/octet-stream"
+      });
       const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = attachment.name;
-      link.click();
-      URL.revokeObjectURL(url);
+      window.open(url, "_blank");
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Download failed";
       setError(message);
@@ -1038,13 +1012,14 @@ export default function App() {
   }, [auth.user?.id, privateKey]);
 
   useEffect(() => {
-    if (!auth.user || !privateKey || !auth.user.public_key) return;
+    const publicKey = auth.user?.public_key;
+    if (!publicKey || !privateKey) return;
     if (autosaveTimer.current) {
       window.clearTimeout(autosaveTimer.current);
     }
     autosaveTimer.current = window.setTimeout(async () => {
       try {
-        const payload = await encryptDraftPayload(draft, auth.user.public_key);
+        const payload = await encryptDraftPayload(draft, publicKey);
         await saveDraft({
           id: draftKey(selectedId),
           encryptedTitle: payload.encryptedTitle,
@@ -1075,7 +1050,7 @@ export default function App() {
   useEffect(() => {
     if (!auth.accessToken || !auth.user || !privateKey) return;
 
-    const socket = io(API_BASE, {
+    const socket = io(API_BASE || window.location.origin, {
       auth: { token: auth.accessToken }
     });
     socketRef.current = socket;
