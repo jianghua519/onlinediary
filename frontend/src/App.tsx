@@ -133,7 +133,7 @@ type FiltersState = {
   to?: Date;
 };
 
-type ViewMode = "overview" | "list" | "calendar" | "media" | "map";
+type ViewMode = "overview" | "list" | "calendar" | "media";
 
 type MediaFilter = "all" | "image" | "video" | "audio" | "pdf";
 
@@ -265,18 +265,6 @@ const serializePayload = (payload: EncryptedPayload) =>
 const parsePayload = (value: string) =>
   JSON.parse(textDecoder.decode(decodeBase64(value))) as EncryptedPayload;
 
-const toLocalInputValue = (date: Date) => {
-  const pad = (value: number) => String(value).padStart(2, "0");
-  return (
-    [
-      date.getFullYear(),
-      pad(date.getMonth() + 1),
-      pad(date.getDate())
-    ].join("-") +
-    "T" +
-    [pad(date.getHours()), pad(date.getMinutes())].join(":")
-  );
-};
 
 const parseLocalDate = (value: string) => {
   if (!value) return undefined;
@@ -293,6 +281,31 @@ const toDateInputValue = (date?: Date) => {
     pad(date.getDate())
   ].join("-");
 };
+
+const getDraftSignature = (next: DraftState) =>
+  JSON.stringify({
+    title: next.title,
+    content: next.content,
+    tags: next.tags,
+    mood: next.mood,
+    weather: next.weather,
+    location: next.location,
+    entryDate: toDateInputValue(next.entryDate),
+    isFavorite: next.isFavorite
+  });
+
+const isDraftMeaningful = (next: DraftState) => {
+  const content = next.content.replace(/[#\s]/g, "");
+  return Boolean(
+    content ||
+      next.title.trim() ||
+      next.tags.trim() ||
+      next.mood.trim() ||
+      next.weather.trim() ||
+      next.location.trim()
+  );
+};
+
 
 const deriveTitle = (markdown: string) => {
   const line = markdown
@@ -407,6 +420,7 @@ export default function App() {
   const [benchmark, setBenchmark] = useState<{ smallMs: number; largeMs: number } | null>(null);
   const [adminUsers, setAdminUsers] = useState<AdminUser[]>([]);
   const [attachments, setAttachments] = useState<AttachmentView[]>([]);
+  const [entryThumbnails, setEntryThumbnails] = useState<Record<string, string | null>>({});
   const [uploading, setUploading] = useState(false);
   const [filters, setFilters] = useState<FiltersState>({
     query: "",
@@ -422,16 +436,27 @@ export default function App() {
   const [showUserInfo, setShowUserInfo] = useState(true);
   const [showAdminPanel, setShowAdminPanel] = useState(false);
   const autosaveTimer = useRef<number | null>(null);
+  const remoteSaveTimer = useRef<number | null>(null);
   const statusTimer = useRef<number | null>(null);
   const lastSyncedContent = useRef<string | null>(null);
+  const lastRemoteSignature = useRef<string | null>(null);
+  const remoteSaving = useRef(false);
+  const suppressEditorUpdate = useRef(false);
+  const hasUserEdit = useRef(false);
   const socketRef = useRef<ReturnType<typeof io> | null>(null);
+  const entryThumbLoading = useRef(new Set<string>());
 
   const editor = useEditor({
     extensions: [StarterKit],
     content: marked.parse(draft.content || ""),
     onUpdate: ({ editor }) => {
+      if (suppressEditorUpdate.current) {
+        suppressEditorUpdate.current = false;
+        return;
+      }
       const markdown = defaultMarkdownSerializer.serialize(editor.state.doc);
       const nextTitle = deriveTitle(markdown);
+      hasUserEdit.current = true;
       lastSyncedContent.current = markdown;
       setDraft((prev) => ({ ...prev, content: markdown, title: nextTitle }));
     }
@@ -660,6 +685,7 @@ export default function App() {
     setEntries([]);
     setSelectedId(null);
     setAttachments([]);
+    setEntryThumbnails({});
   };
 
 
@@ -734,9 +760,9 @@ export default function App() {
       textEncoder.encode(next.content),
       entryKey
     );
-    const encryptedTitle = next.title
+    const encryptedTitlePayload = next.title
       ? await encryptWithEntryKey(textEncoder.encode(next.title), entryKey)
-      : null;
+      : undefined;
 
     const metadata: EntryMetadata = {
       tags: next.tags
@@ -750,18 +776,25 @@ export default function App() {
 
     const hasMetadata =
       metadata.tags.length || metadata.mood || metadata.weather || metadata.location;
-    const encryptedMetadata = hasMetadata
+    const encryptedMetadataPayload = hasMetadata
       ? await encryptWithEntryKey(
           textEncoder.encode(JSON.stringify(metadata)),
           entryKey
         )
-      : null;
+      : undefined;
+
+    const encryptedTitle = encryptedTitlePayload
+      ? serializePayload(encryptedTitlePayload)
+      : undefined;
+    const encryptedMetadata = encryptedMetadataPayload
+      ? serializePayload(encryptedMetadataPayload)
+      : undefined;
 
     return {
       encryptedEntryKey,
       encryptedContent: serializePayload(encryptedContent),
-      encryptedTitle: encryptedTitle ? serializePayload(encryptedTitle) : null,
-      encryptedMetadata: encryptedMetadata ? serializePayload(encryptedMetadata) : null
+      ...(encryptedTitle ? { encryptedTitle } : {}),
+      ...(encryptedMetadata ? { encryptedMetadata } : {})
     };
   };
 
@@ -790,6 +823,21 @@ export default function App() {
     } as AttachmentView;
   };
 
+  const buildThumbnailUrl = async (attachment: AttachmentRecord, key: JsonWebKey) => {
+    if (!attachment.encryptedFileKey || !attachment.hasThumbnail) return null;
+    const response = await apiFetch(`/api/attachments/${attachment.id}/thumbnail`);
+    if (!response.ok) return null;
+    const payloadText = await response.text();
+    const fileKey = await unwrapEntryKey(attachment.encryptedFileKey, key);
+    const filePayload = parsePayload(payloadText);
+    const fileBytes = await decryptWithEntryKey(filePayload, fileKey);
+    const fileBuffer = Uint8Array.from(fileBytes).buffer;
+    const blob = new Blob([fileBuffer], {
+      type: attachment.mimeType ?? "image/*"
+    });
+    return URL.createObjectURL(blob);
+  };
+
   const encryptAttachmentPayload = async (file: File, filename: string, publicKey: string) => {
     const fileKey = await generateEntryKey();
     const encryptedFileKey = await wrapEntryKey(publicKey, fileKey);
@@ -812,12 +860,53 @@ export default function App() {
       }
       const payload = (await response.json()) as { attachments: AttachmentRecord[] };
       const items = await Promise.all(
-        payload.attachments.map((attachment) => decryptAttachmentMeta(attachment, key))
+        payload.attachments.map(async (attachment) => {
+          const view = await decryptAttachmentMeta(attachment, key);
+          const previewUrl = await buildThumbnailUrl(attachment, key);
+          return { ...view, previewUrl };
+        })
       );
       setAttachments(items.map((item) => ({ ...item })));
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to load attachments";
       setError(message);
+    }
+  };
+
+  const loadEntryThumbnail = async (entryId: string, key: JsonWebKey) => {
+    if (entryThumbLoading.current.has(entryId)) return;
+    entryThumbLoading.current.add(entryId);
+    try {
+      const response = await apiFetch(
+        `/api/attachments?entryId=${encodeURIComponent(entryId)}`
+      );
+      if (!response.ok) {
+        throw new Error("Failed to load attachments");
+      }
+      const payload = (await response.json()) as { attachments: AttachmentRecord[] };
+      const candidate =
+        payload.attachments.find(
+          (attachment) =>
+            attachment.hasThumbnail &&
+            attachment.encryptedFileKey &&
+            attachment.mimeType?.startsWith("image/")
+        ) ??
+        payload.attachments.find(
+          (attachment) => attachment.hasThumbnail && attachment.encryptedFileKey
+        );
+      if (!candidate) {
+        setEntryThumbnails((prev) => ({ ...prev, [entryId]: null }));
+        return;
+      }
+      const previewUrl = await buildThumbnailUrl(candidate, key);
+      setEntryThumbnails((prev) => ({
+        ...prev,
+        [entryId]: previewUrl ?? null
+      }));
+    } catch (err) {
+      setEntryThumbnails((prev) => ({ ...prev, [entryId]: null }));
+    } finally {
+      entryThumbLoading.current.delete(entryId);
     }
   };
 
@@ -946,6 +1035,8 @@ export default function App() {
         payload.entries.map((entry) => decryptEntryRecord(entry, key))
       );
       decrypted.sort((a, b) => b.entryDate.getTime() - a.entryDate.getTime());
+      entryThumbLoading.current.clear();
+      setEntryThumbnails({});
       setEntries(decrypted);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to load entries";
@@ -994,6 +1085,8 @@ export default function App() {
         entryDate: new Date(stored.entryDate),
         isFavorite: stored.isFavorite
       });
+      hasUserEdit.current = false;
+      lastRemoteSignature.current = null;
       setSelectedId(entryId ?? null);
     } catch {
       setError("Failed to restore draft.");
@@ -1003,7 +1096,9 @@ export default function App() {
   useEffect(() => {
     if (!editor) return;
     if (draft.content === lastSyncedContent.current) return;
+    suppressEditorUpdate.current = true;
     editor.commands.setContent(marked.parse(draft.content || ""), false);
+    lastSyncedContent.current = draft.content;
   }, [draft.content, editor]);
 
   useEffect(() => {
@@ -1013,10 +1108,16 @@ export default function App() {
 
   useEffect(() => {
     const publicKey = auth.user?.public_key;
-    if (!publicKey || !privateKey) return;
+
     if (autosaveTimer.current) {
       window.clearTimeout(autosaveTimer.current);
     }
+    if (remoteSaveTimer.current) {
+      window.clearTimeout(remoteSaveTimer.current);
+    }
+
+    if (!publicKey || !privateKey || !isEditing) return;
+
     autosaveTimer.current = window.setTimeout(async () => {
       try {
         const payload = await encryptDraftPayload(draft, publicKey);
@@ -1033,14 +1134,35 @@ export default function App() {
       } catch {
         setError("Failed to save draft locally.");
       }
-    }, 3000);
+    }, 1500);
+
+    const signature = getDraftSignature(draft);
+    if (signature === lastRemoteSignature.current) {
+      return;
+    }
+
+    remoteSaveTimer.current = window.setTimeout(async () => {
+      if (!isDraftMeaningful(draft)) return;
+      if (!hasUserEdit.current) return;
+      if (remoteSaving.current) return;
+      remoteSaving.current = true;
+      try {
+        await saveEntry({ closeOnSuccess: false, silent: true });
+        lastRemoteSignature.current = signature;
+      } finally {
+        remoteSaving.current = false;
+      }
+    }, 2000);
 
     return () => {
       if (autosaveTimer.current) {
         window.clearTimeout(autosaveTimer.current);
       }
+      if (remoteSaveTimer.current) {
+        window.clearTimeout(remoteSaveTimer.current);
+      }
     };
-  }, [draft, auth.user?.public_key, privateKey, selectedId]);
+  }, [draft, auth.user?.public_key, privateKey, selectedId, isEditing]);
 
   useEffect(() => {
     if (!privateKey || !selectedId) return;
@@ -1091,6 +1213,8 @@ export default function App() {
       isFavorite: false
     };
     lastSyncedContent.current = next.content;
+    lastRemoteSignature.current = null;
+    hasUserEdit.current = false;
     setDraft(next);
     setSelectedId(null);
     setAttachments([]);
@@ -1099,6 +1223,8 @@ export default function App() {
   const handleSelectEntry = async (entry: EntryView) => {
     setError(null);
     setStatus(null);
+    hasUserEdit.current = false;
+    lastRemoteSignature.current = null;
     setSelectedId(entry.id);
     setDraft({
       title: entry.title,
@@ -1123,15 +1249,10 @@ export default function App() {
     resetDraft();
     setIsEditing(true);
     setShowSidePanel(false);
-    await restoreDraft(null);
+    await removeDraft(draftKey(null));
   };
 
-  const handleCloseEditor = () => {
-    setIsEditing(false);
-    setStatus(null);
-    setError(null);
-  };
-
+  
   const showTransientStatus = (message: string) => {
     setStatus(message);
     setStatusTransient(true);
@@ -1144,11 +1265,14 @@ export default function App() {
     }, 2000);
   };
 
-  const handleSaveEntry = async () => {
+  const saveEntry = async (options?: { closeOnSuccess?: boolean; silent?: boolean }) => {
     if (!auth.user || !privateKey) return;
-    setSaving(true);
+    const silent = options?.silent ?? false;
+    if (!silent) {
+      setSaving(true);
+      setStatus(null);
+    }
     setError(null);
-    setStatus(null);
     try {
       const payload = await encryptDraftPayload(draft, auth.user.public_key);
       const entryDate = draft.entryDate.toISOString();
@@ -1209,15 +1333,36 @@ export default function App() {
         entryDate: decrypted.entryDate,
         isFavorite: decrypted.isFavorite
       });
+      lastRemoteSignature.current = getDraftSignature({
+        title: decrypted.title,
+        content: decrypted.content || "# ",
+        tags: decrypted.tags ?? "",
+        mood: decrypted.mood ?? "",
+        weather: decrypted.weather ?? "",
+        location: decrypted.location ?? "",
+        entryDate: decrypted.entryDate,
+        isFavorite: decrypted.isFavorite
+      });
       await removeDraft(draftKey(null));
       await removeDraft(draftKey(decrypted.id));
-      showTransientStatus(UI.savedSynced);
+      if (!silent) {
+        showTransientStatus(UI.savedSynced);
+      }
+      if (options?.closeOnSuccess) {
+        setIsEditing(false);
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to save entry";
       setError(message);
     } finally {
-      setSaving(false);
+      if (!silent) {
+        setSaving(false);
+      }
     }
+  };
+
+  const handleSaveEntry = async () => {
+    await saveEntry({ closeOnSuccess: true, silent: false });
   };
 
   const handleDeleteEntry = async () => {
@@ -1302,8 +1447,7 @@ export default function App() {
   };
 
   const handleSelectCalendarDay = (day: Date) => {
-    const iso = day.toISOString().slice(0, 10);
-    setSelectedDate(iso);
+    setSelectedDate(toDateInputValue(day));
     setFilters((prev) => ({
       ...prev,
       from: day,
@@ -1432,6 +1576,14 @@ export default function App() {
     });
   }, [entries, filters]);
 
+  useEffect(() => {
+    if (!privateKey || viewMode !== "list") return;
+    filteredEntries.forEach((entry) => {
+      if (entryThumbnails[entry.id] !== undefined) return;
+      void loadEntryThumbnail(entry.id, privateKey);
+    });
+  }, [filteredEntries, privateKey, viewMode, entryThumbnails]);
+
   const filteredAttachments = useMemo(() => {
     if (mediaFilter === "all") return attachments;
     return attachments.filter((attachment) => {
@@ -1454,9 +1606,10 @@ export default function App() {
     calendarCells.push(null);
   }
 
-  const entryDates = useMemo(() => {
-    return new Set(entries.map((entry) => entry.entryDate.toISOString().slice(0, 10)));
-  }, [entries]);
+  const entryDates = useMemo(
+    () => new Set(entries.map((entry) => toDateInputValue(entry.entryDate))),
+    [entries]
+  );
 
   if (loading) {
     return (
@@ -1602,13 +1755,6 @@ export default function App() {
             >
               {UI.media}
             </button>
-            <button
-              type="button"
-              className={`tab ${viewMode === "map" ? "active" : ""}`}
-              onClick={() => setViewMode("map")}
-            >
-              {UI.map}
-            </button>
           </div>
 
           {viewMode === "overview" ? (
@@ -1692,6 +1838,7 @@ export default function App() {
                       .replace(/^#\s+.*\n/, "")
                       .replace(/\n+/g, " ")
                       .trim();
+                    const thumbUrl = entryThumbnails[entry.id];
                     return (
                       <div key={entry.id} className="entry-row">
                         <button type="button" onClick={() => handleSelectEntry(entry)}>
@@ -1710,6 +1857,9 @@ export default function App() {
                           <div className="entry-meta">
                             <span>{entry.entryDate.toLocaleDateString()}</span>
                             <span>{entry.isFavorite ? "\u2605" : ""}</span>
+                          </div>
+                          <div className="entry-thumb">
+                            {thumbUrl ? <img src={thumbUrl} alt="" /> : null}
                           </div>
                         </button>
                       </div>
@@ -1753,7 +1903,7 @@ export default function App() {
                   if (!day) {
                     return <div key={`empty-${index}`} className="calendar-cell empty" />;
                   }
-                  const iso = day.toISOString().slice(0, 10);
+                  const iso = toDateInputValue(day);
                   const hasEntry = entryDates.has(iso);
                   const isSelected = selectedDate === iso;
                   return (
@@ -1836,12 +1986,7 @@ export default function App() {
             </div>
           ) : null}
 
-          {viewMode === "map" ? (
-            <div className="map-view">
-              <p className="muted">{UI.mapSoon}</p>
-            </div>
-          ) : null}
-        </section>
+                  </section>
 
         <button type="button" className="fab" onClick={handleCreateNew}>
           +
@@ -1851,41 +1996,40 @@ export default function App() {
       {isEditing ? (
         <div className="editor-sheet">
           <div className="editor-header">
-            <button type="button" className="pill ghost" onClick={handleCloseEditor}>
-              {UI.editorClose}
-            </button>
-            <div>
+            <div className="editor-header-left">
               <button
                 type="button"
-                className="pill"
-                onClick={handleSaveEntry}
-                disabled={saving}
+                className="icon-btn editor-close"
+                onClick={() => setIsEditing(false)}
               >
-                {saving ? UI.saving : UI.editorDone}
+                {UI.editorClose}
               </button>
+              <div className="editor-date">
+                <span>{UI.entryDate}</span>
+                <strong>{draft.entryDate.toLocaleDateString()}</strong>
+              </div>
             </div>
+            <button
+              type="button"
+              className="pill primary"
+              onClick={handleSaveEntry}
+              disabled={saving}
+            >
+              {saving ? UI.saving : UI.editorDone}
+            </button>
           </div>
           <div className="editor-body" onPaste={handlePasteImage}>
-            <div className="editor-meta">
+            <div className="editor-meta compact">
               <label>
                 {UI.entryDate}
                 <input
                   type="date"
-                  value={toLocalInputValue(draft.entryDate)}
+                  value={toDateInputValue(draft.entryDate)}
                   onChange={(event) =>
                     setDraft((prev) => ({
                       ...prev,
                       entryDate: parseLocalDate(event.target.value) ?? new Date()
                     }))
-                  }
-                />
-              </label>
-              <label>
-                {UI.location}
-                <input
-                  value={draft.location}
-                  onChange={(event) =>
-                    setDraft((prev) => ({ ...prev, location: event.target.value }))
                   }
                 />
               </label>
@@ -1926,13 +2070,6 @@ export default function App() {
                       <span>{formatSize(attachment.fileSize)}</span>
                     </div>
                     <div className="attachment-actions">
-                      <button
-                        type="button"
-                        className="pill ghost"
-                        onClick={() => handleAttachmentOpen(attachment)}
-                      >
-                        {UI.open}
-                      </button>
                       <button
                         type="button"
                         className="pill"
