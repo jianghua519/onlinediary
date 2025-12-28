@@ -1,5 +1,5 @@
 
-import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type FormEvent, type MouseEvent } from "react";
 import { EditorContent, useEditor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { marked } from "marked";
@@ -280,6 +280,14 @@ const toDateInputValue = (date?: Date) => {
     pad(date.getMonth() + 1),
     pad(date.getDate())
   ].join("-");
+};
+
+
+const openDatePicker = (event: MouseEvent<HTMLInputElement>) => {
+  const target = event.currentTarget as HTMLInputElement & {
+    showPicker?: () => void;
+  };
+  target.showPicker?.();
 };
 
 const getDraftSignature = (next: DraftState) =>
@@ -823,33 +831,48 @@ export default function App() {
     } as AttachmentView;
   };
 
-  const buildThumbnailUrl = async (attachment: AttachmentRecord, key: JsonWebKey) => {
-    if (!attachment.encryptedFileKey || !attachment.hasThumbnail) return null;
-    const response = await apiFetch(`/api/attachments/${attachment.id}/thumbnail`);
+  const fetchDecryptedBlob = async (
+    url: string,
+    attachment: AttachmentRecord,
+    key: JsonWebKey
+  ) => {
+    const response = await apiFetch(url);
     if (!response.ok) return null;
     const payloadText = await response.text();
-    const fileKey = await unwrapEntryKey(attachment.encryptedFileKey, key);
+    const fileKey = await unwrapEntryKey(attachment.encryptedFileKey ?? "", key);
     const filePayload = parsePayload(payloadText);
     const fileBytes = await decryptWithEntryKey(filePayload, fileKey);
     const fileBuffer = Uint8Array.from(fileBytes).buffer;
-    const blob = new Blob([fileBuffer], {
+    return new Blob([fileBuffer], {
       type: attachment.mimeType ?? "image/*"
     });
-    return URL.createObjectURL(blob);
   };
 
-  const encryptAttachmentPayload = async (file: File, filename: string, publicKey: string) => {
-    const fileKey = await generateEntryKey();
-    const encryptedFileKey = await wrapEntryKey(publicKey, fileKey);
-    const encryptedFilename = await encryptWithEntryKey(textEncoder.encode(filename), fileKey);
-    const fileBytes = new Uint8Array(await file.arrayBuffer());
-    const encryptedFile = await encryptWithEntryKey(fileBytes, fileKey);
-    return {
-      encryptedFileKey,
-      encryptedFilename,
-      encryptedFile
-    };
+  const buildThumbnailUrl = async (attachment: AttachmentRecord, key: JsonWebKey) => {
+    if (!attachment.encryptedFileKey) return null;
+    try {
+      if (attachment.hasThumbnail) {
+        const thumbBlob = await fetchDecryptedBlob(
+          `/api/attachments/${attachment.id}/thumbnail`,
+          attachment,
+          key
+        );
+        if (thumbBlob) return URL.createObjectURL(thumbBlob);
+      }
+      if (attachment.mimeType?.startsWith("image/")) {
+        const fileBlob = await fetchDecryptedBlob(
+          `/api/attachments/${attachment.id}/file`,
+          attachment,
+          key
+        );
+        if (fileBlob) return URL.createObjectURL(fileBlob);
+      }
+      return null;
+    } catch {
+      return null;
+    }
   };
+
   const loadAttachments = async (entryId: string, key: JsonWebKey) => {
     try {
       const response = await apiFetch(
@@ -937,28 +960,25 @@ export default function App() {
           useWebWorker: true
         });
 
-        const encrypted = await encryptAttachmentPayload(
-          compressed,
-          file.name,
-          auth.user.public_key
+        const fileKey = await generateEntryKey();
+        const encryptedFileKey = await wrapEntryKey(auth.user.public_key, fileKey);
+        const encryptedFilename = await encryptWithEntryKey(
+          textEncoder.encode(file.name),
+          fileKey
         );
-        const encryptedThumb = await encryptAttachmentPayload(
-          thumb,
-          `${file.name}-thumb`,
-          auth.user.public_key
-        );
+        const fileBytes = new Uint8Array(await compressed.arrayBuffer());
+        const encryptedFile = await encryptWithEntryKey(fileBytes, fileKey);
+        const thumbBytes = new Uint8Array(await thumb.arrayBuffer());
+        const encryptedThumb = await encryptWithEntryKey(thumbBytes, fileKey);
 
         const form = new FormData();
         form.append("entryId", selectedId);
-        form.append("encryptedFileKey", encrypted.encryptedFileKey);
-        form.append("encryptedFilename", serializePayload(encrypted.encryptedFilename));
-        form.append("file", new Blob([serializePayload(encrypted.encryptedFile)]));
+        form.append("encryptedFileKey", encryptedFileKey);
+        form.append("encryptedFilename", serializePayload(encryptedFilename));
+        form.append("file", new Blob([serializePayload(encryptedFile)]));
         form.append("mimeType", file.type);
         form.append("fileSize", String(file.size));
-        form.append(
-          "thumbnail",
-          new Blob([serializePayload(encryptedThumb.encryptedFile)])
-        );
+        form.append("thumbnail", new Blob([serializePayload(encryptedThumb)]));
 
         const response = await apiFetch("/api/attachments", {
           method: "POST",
@@ -1791,6 +1811,7 @@ export default function App() {
             <div>
               <div className="filters">
                 <input
+                  className="filter-search"
                   placeholder={UI.searchPlaceholder}
                   value={filters.query}
                   onChange={(event) =>
@@ -1799,7 +1820,9 @@ export default function App() {
                 />
                 <input
                   type="date"
+                  className="filter-date"
                   value={toDateInputValue(filters.from)}
+                  onClick={openDatePicker}
                   onChange={(event) =>
                     setFilters((prev) => ({
                       ...prev,
@@ -1809,7 +1832,9 @@ export default function App() {
                 />
                 <input
                   type="date"
+                  className="filter-date"
                   value={toDateInputValue(filters.to)}
+                  onClick={openDatePicker}
                   onChange={(event) =>
                     setFilters((prev) => ({
                       ...prev,
@@ -2025,6 +2050,7 @@ export default function App() {
                 <input
                   type="date"
                   value={toDateInputValue(draft.entryDate)}
+                  onClick={openDatePicker}
                   onChange={(event) =>
                     setDraft((prev) => ({
                       ...prev,
@@ -2061,7 +2087,13 @@ export default function App() {
                 {attachments.map((attachment) => (
                   <div key={attachment.id} className="attachment-card">
                     {attachment.previewUrl ? (
-                      <img src={attachment.previewUrl} alt="" className="attachment-thumb" />
+                      <button
+                        type="button"
+                        className="attachment-thumb preview-button"
+                        onClick={() => handleAttachmentOpen(attachment)}
+                      >
+                        <img src={attachment.previewUrl} alt="" />
+                      </button>
                     ) : (
                       <div className="attachment-thumb placeholder">FILE</div>
                     )}
