@@ -11,7 +11,9 @@ coverage/
 # Env
 .env
 .env.local
-**/.env
+backend/.env
+frontend/.env
+
 
 
 # Logs
