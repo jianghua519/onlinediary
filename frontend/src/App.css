@@ -18,11 +18,20 @@
   box-sizing: border-box;
 }
 
+html,
+body,
+#root {
+  width: 100%;
+  overflow-x: hidden;
+}
+
 body {
   margin: 0;
   font-family: "Source Sans 3", "PingFang SC", "Microsoft YaHei", sans-serif;
   color: var(--text);
   background: var(--sky);
+  overscroll-behavior-x: none;
+  touch-action: pan-y;
 }
 
 button,
@@ -574,7 +583,14 @@ input[type="date"]::-webkit-calendar-picker-indicator {
   backdrop-filter: blur(12px);
 }
 
-.editor-body {
+.editor-html,
+body,
+#root {
+  width: 100%;
+  overflow-x: hidden;
+}
+
+body {
   position: relative;
   padding: 20px;
   display: grid;
@@ -870,6 +886,13 @@ mark {
   --accent: #3b8df6;
   --accent-dark: #2162b6;
   --chip: #eef5ff;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  overflow-x: hidden;
 }
 
 body {

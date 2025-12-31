@@ -1232,7 +1232,7 @@ export default function App() {
       entryDate: new Date(),
       isFavorite: false
     };
-    lastSyncedContent.current = next.content;
+    lastSyncedContent.current = "";
     lastRemoteSignature.current = null;
     hasUserEdit.current = false;
     setDraft(next);
@@ -1985,7 +1985,7 @@ export default function App() {
                         <div className="attachment-thumb placeholder">FILE</div>
                       )}
                       <div className="attachment-info">
-                        <p>{attachment.name || UI.untitled}</p>
+                        {!attachment.previewUrl ? <p>{attachment.name || UI.untitled}</p> : null}
                         <span>{formatSize(attachment.fileSize)}</span>
                       </div>
                       <div className="attachment-actions">
@@ -2098,7 +2098,7 @@ export default function App() {
                       <div className="attachment-thumb placeholder">FILE</div>
                     )}
                     <div className="attachment-info">
-                      <p>{attachment.name || UI.untitled}</p>
+                      {!attachment.previewUrl ? <p>{attachment.name || UI.untitled}</p> : null}
                       <span>{formatSize(attachment.fileSize)}</span>
                     </div>
                     <div className="attachment-actions">
